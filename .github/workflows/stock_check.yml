@@ -2,16 +2,13 @@ name: Reiss Stock Checker
 
 on:
   schedule:
-    # Runs every 2 hours (cron is UTC)
-    - cron: "0 */2 * * *"
-
-  # Allow manual trigger from GitHub UI
-  workflow_dispatch:
+    - cron: "0 */2 * * *"   # every 2 hours
+  workflow_dispatch:          # manual trigger
 
 jobs:
   check-stock:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -22,9 +19,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
       - name: Run stock checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python check_stock.py
-
