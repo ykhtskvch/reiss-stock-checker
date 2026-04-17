@@ -145,19 +145,23 @@ def send_telegram(message: str) -> None:
         if not result.get("ok"):
             raise RuntimeError(f"Telegram error: {result}")
 
-
 def main() -> None:
-    print("Sending test notification...")
-    message = (
-        f"🧪 <b>Тест — агент работает!</b>\n\n"
-        f"Reiss Valencia Contrast-Trim Flared Midi Dress\n"
-        f"Colour: Ivory/Black · Size: 12\n\n"
-        f'👉 <a href="{PRODUCT_URL}">Ссылка на платье</a>'
-    )
-    send_telegram(message)
-    print("Test message sent!")
+    print(f"Checking stock for Valencia dress size {TARGET_SIZE}...")
+    available = check_size_available()
+
+    if available:
+        print("✅ Size 12 IN STOCK — sending Telegram notification!")
+        message = (
+            f"🛍 <b>Valencia dress — Size {TARGET_SIZE} is back in stock!</b>\n\n"
+            f"Reiss Valencia Contrast-Trim Flared Midi Dress\n"
+            f"Colour: Ivory/Black · Size: {TARGET_SIZE}\n\n"
+            f'👉 <a href="{PRODUCT_URL}">Buy now — £128</a>'
+        )
+        send_telegram(message)
+        print("Telegram message sent.")
+    else:
+        print(f"❌ Size {TARGET_SIZE} still out of stock. No notification sent.")
 
 
 if __name__ == "__main__":
     main()
-
