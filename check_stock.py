@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Reiss stock checker for Valencia dress (AP6-297, Ivory/Black, size 12).
-Uses Playwright to render the JS page and bypass bot protection.
+Reiss stock checker for Valencia dress (AP6-297, Ivory/Black).
+Checks multiple sizes and sends a Telegram notification for each one in stock.
 """
 
 import os
@@ -9,14 +9,14 @@ import json
 import re
 import urllib.request
 
-PRODUCT_URL = "https://www.reiss.com/style/su581028/ap6297"
-TARGET_SIZE  = "12"
+PRODUCT_URL  = "https://www.reiss.com/style/su581028/ap6297"
+TARGET_SIZES = ["10", "12"]  # Add or remove sizes here
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 
-def check_size_available() -> bool:
+def check_size_available(target_size: str) -> bool:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -32,68 +32,62 @@ def check_size_available() -> bool:
         )
         page = context.new_page()
 
-        print(f"Opening {PRODUCT_URL} ...")
-        # Wait for the page to fully load including JS
+        print(f"  Opening {PRODUCT_URL} ...")
         page.goto(PRODUCT_URL, wait_until="networkidle", timeout=30000)
-        # Extra pause to let React render size buttons
         page.wait_for_timeout(3000)
 
         html = page.content()
         browser.close()
 
-    print("Page loaded, analysing sizes...")
+    print(f"  Page loaded, analysing size {target_size}...")
 
     # ── Strategy 1: find JSON blobs with size + stock info ───────────────
-    # Reiss embeds Next.js __NEXT_DATA__ or similar JSON in the page
     json_blobs = re.findall(r'\{[^{}]{20,5000}\}', html)
     for blob in json_blobs:
-        if '"12"' not in blob and "'12'" not in blob and ':12,' not in blob:
+        if f'"{target_size}"' not in blob and f"'{target_size}'" not in blob:
             continue
         try:
             data = json.loads(blob)
-            result = walk_json_for_size(data, TARGET_SIZE)
+            result = walk_json_for_size(data, target_size)
             if result is not None:
-                print(f"✅ Found via JSON blob: size 12 in_stock={result}")
+                print(f"  Found via JSON blob: size {target_size} in_stock={result}")
                 return result
         except Exception:
             pass
 
-    # ── Strategy 2: regex on raw HTML ───────────────────────────────────
-    # Pattern: size label near stock/available field
+    # ── Strategy 2: regex on raw HTML ────────────────────────────────────
     in_stock_patterns = [
-        r'"(?:size|label|sizeLabel)"\s*:\s*"12"[^}]{0,120}"(?:available|inStock|isAvailable)"\s*:\s*true',
-        r'"(?:available|inStock|isAvailable)"\s*:\s*true[^}]{0,120}"(?:size|label|sizeLabel)"\s*:\s*"12"',
-        r'data-size=["\']12["\'][^>]*(?<!disabled)(?<!sold-out)(?<!unavailable)>',
+        rf'"(?:size|label|sizeLabel)"\s*:\s*"{target_size}"[^}}]{{0,120}}"(?:available|inStock|isAvailable)"\s*:\s*true',
+        rf'"(?:available|inStock|isAvailable)"\s*:\s*true[^}}]{{0,120}}"(?:size|label|sizeLabel)"\s*:\s*"{target_size}"',
     ]
     out_of_stock_patterns = [
-        r'"(?:size|label|sizeLabel)"\s*:\s*"12"[^}]{0,120}"(?:available|inStock|isAvailable)"\s*:\s*false',
-        r'"(?:available|inStock|isAvailable)"\s*:\s*false[^}]{0,120}"(?:size|label|sizeLabel)"\s*:\s*"12"',
-        r'data-size=["\']12["\'][^>]*(?:disabled|sold-out|unavailable)',
+        rf'"(?:size|label|sizeLabel)"\s*:\s*"{target_size}"[^}}]{{0,120}}"(?:available|inStock|isAvailable)"\s*:\s*false',
+        rf'"(?:available|inStock|isAvailable)"\s*:\s*false[^}}]{{0,120}}"(?:size|label|sizeLabel)"\s*:\s*"{target_size}"',
     ]
 
     for pat in in_stock_patterns:
         if re.search(pat, html, re.IGNORECASE):
-            print(f"✅ Regex matched in-stock: {pat[:60]}")
+            print(f"  Regex matched in-stock for size {target_size}")
             return True
 
     for pat in out_of_stock_patterns:
         if re.search(pat, html, re.IGNORECASE):
-            print(f"❌ Regex matched out-of-stock: {pat[:60]}")
+            print(f"  Regex matched out-of-stock for size {target_size}")
             return False
 
-    # ── Strategy 3: look at __NEXT_DATA__ specifically ──────────────────
+    # ── Strategy 3: __NEXT_DATA__ ─────────────────────────────────────────
     next_data = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
     if next_data:
         try:
             data = json.loads(next_data.group(1))
-            result = walk_json_for_size(data, TARGET_SIZE)
+            result = walk_json_for_size(data, target_size)
             if result is not None:
-                print(f"✅ Found in __NEXT_DATA__: size 12 in_stock={result}")
+                print(f"  Found in __NEXT_DATA__: size {target_size} in_stock={result}")
                 return result
         except Exception as e:
-            print(f"[WARN] Could not parse __NEXT_DATA__: {e}")
+            print(f"  [WARN] Could not parse __NEXT_DATA__: {e}")
 
-    print("⚠️  Could not determine stock status — assuming OUT of stock to avoid false alerts.")
+    print(f"  Could not determine stock status for size {target_size} — assuming OUT of stock.")
     return False
 
 
@@ -145,22 +139,24 @@ def send_telegram(message: str) -> None:
         if not result.get("ok"):
             raise RuntimeError(f"Telegram error: {result}")
 
-def main() -> None:
-    print(f"Checking stock for Valencia dress size {TARGET_SIZE}...")
-    available = check_size_available()
 
-    if available:
-        print("✅ Size 12 IN STOCK — sending Telegram notification!")
-        message = (
-            f"🛍 <b>Valencia dress — Size {TARGET_SIZE} is back in stock!</b>\n\n"
-            f"Reiss Valencia Contrast-Trim Flared Midi Dress\n"
-            f"Colour: Ivory/Black · Size: {TARGET_SIZE}\n\n"
-            f'👉 <a href="{PRODUCT_URL}">Buy now — £128</a>'
-        )
-        send_telegram(message)
-        print("Telegram message sent.")
-    else:
-        print(f"❌ Size {TARGET_SIZE} still out of stock. No notification sent.")
+def main() -> None:
+    for size in TARGET_SIZES:
+        print(f"\nChecking size {size}...")
+        available = check_size_available(size)
+
+        if available:
+            print(f"✅ Size {size} IN STOCK — sending Telegram notification!")
+            message = (
+                f"🛍 <b>Valencia dress — Size {size} is back in stock!</b>\n\n"
+                f"Reiss Valencia Contrast-Trim Flared Midi Dress\n"
+                f"Colour: Ivory/Black · Size: {size}\n\n"
+                f'👉 <a href="{PRODUCT_URL}">Buy now — £128</a>'
+            )
+            send_telegram(message)
+            print("  Telegram message sent.")
+        else:
+            print(f"❌ Size {size} still out of stock. No notification sent.")
 
 
 if __name__ == "__main__":
