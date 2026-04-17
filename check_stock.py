@@ -5,7 +5,6 @@ Uses Playwright to render the JS page and bypass bot protection.
 """
 
 import os
-import sys
 import json
 import re
 import urllib.request
@@ -34,45 +33,99 @@ def check_size_available() -> bool:
         page = context.new_page()
 
         print(f"Opening {PRODUCT_URL} ...")
+        # Wait for the page to fully load including JS
         page.goto(PRODUCT_URL, wait_until="networkidle", timeout=30000)
-
-        # Wait for the size buttons to appear
-        page.wait_for_selector(
-            "[data-testid='size-selector'], .size-selector, [class*='SizeButton'], [class*='size']",
-            timeout=15000
-        )
+        # Extra pause to let React render size buttons
+        page.wait_for_timeout(3000)
 
         html = page.content()
         browser.close()
 
     print("Page loaded, analysing sizes...")
 
-    # Patterns that confirm size 12 is IN stock
-    patterns_in_stock = [
-        r'"size"\s*:\s*"12"\s*,[^}]*"(?:available|inStock)"\s*:\s*true',
-        r'"label"\s*:\s*"12"\s*,[^}]*"available"\s*:\s*true',
-        r'"sizeLabel"\s*:\s*"12"\s*,[^}]*"inStock"\s*:\s*true',
+    # ── Strategy 1: find JSON blobs with size + stock info ───────────────
+    # Reiss embeds Next.js __NEXT_DATA__ or similar JSON in the page
+    json_blobs = re.findall(r'\{[^{}]{20,5000}\}', html)
+    for blob in json_blobs:
+        if '"12"' not in blob and "'12'" not in blob and ':12,' not in blob:
+            continue
+        try:
+            data = json.loads(blob)
+            result = walk_json_for_size(data, TARGET_SIZE)
+            if result is not None:
+                print(f"✅ Found via JSON blob: size 12 in_stock={result}")
+                return result
+        except Exception:
+            pass
+
+    # ── Strategy 2: regex on raw HTML ───────────────────────────────────
+    # Pattern: size label near stock/available field
+    in_stock_patterns = [
+        r'"(?:size|label|sizeLabel)"\s*:\s*"12"[^}]{0,120}"(?:available|inStock|isAvailable)"\s*:\s*true',
+        r'"(?:available|inStock|isAvailable)"\s*:\s*true[^}]{0,120}"(?:size|label|sizeLabel)"\s*:\s*"12"',
+        r'data-size=["\']12["\'][^>]*(?<!disabled)(?<!sold-out)(?<!unavailable)>',
     ]
-    # Patterns that confirm size 12 is OUT of stock
-    patterns_out_of_stock = [
-        r'"size"\s*:\s*"12"\s*,[^}]*"(?:available|inStock)"\s*:\s*false',
-        r'"label"\s*:\s*"12"\s*,[^}]*"available"\s*:\s*false',
-        r'"sizeLabel"\s*:\s*"12"\s*,[^}]*"inStock"\s*:\s*false',
+    out_of_stock_patterns = [
+        r'"(?:size|label|sizeLabel)"\s*:\s*"12"[^}]{0,120}"(?:available|inStock|isAvailable)"\s*:\s*false',
+        r'"(?:available|inStock|isAvailable)"\s*:\s*false[^}]{0,120}"(?:size|label|sizeLabel)"\s*:\s*"12"',
+        r'data-size=["\']12["\'][^>]*(?:disabled|sold-out|unavailable)',
     ]
 
-    for pat in patterns_in_stock:
+    for pat in in_stock_patterns:
         if re.search(pat, html, re.IGNORECASE):
-            print(f"✅ Pattern matched (in stock): {pat}")
+            print(f"✅ Regex matched in-stock: {pat[:60]}")
             return True
 
-    for pat in patterns_out_of_stock:
+    for pat in out_of_stock_patterns:
         if re.search(pat, html, re.IGNORECASE):
-            print(f"❌ Pattern matched (out of stock): {pat}")
+            print(f"❌ Regex matched out-of-stock: {pat[:60]}")
             return False
 
-    # Safe fallback: assume out of stock to avoid false alerts
-    print("⚠️  Could not determine stock status definitively — assuming OUT of stock.")
+    # ── Strategy 3: look at __NEXT_DATA__ specifically ──────────────────
+    next_data = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if next_data:
+        try:
+            data = json.loads(next_data.group(1))
+            result = walk_json_for_size(data, TARGET_SIZE)
+            if result is not None:
+                print(f"✅ Found in __NEXT_DATA__: size 12 in_stock={result}")
+                return result
+        except Exception as e:
+            print(f"[WARN] Could not parse __NEXT_DATA__: {e}")
+
+    print("⚠️  Could not determine stock status — assuming OUT of stock to avoid false alerts.")
     return False
+
+
+def walk_json_for_size(obj, target_size: str, depth: int = 0):
+    """Recursively walk JSON looking for size/stock pairs."""
+    if depth > 10:
+        return None
+
+    if isinstance(obj, dict):
+        size_val = str(
+            obj.get("size") or obj.get("label") or obj.get("sizeLabel") or ""
+        ).strip()
+        if size_val == target_size:
+            for key in ("available", "inStock", "isAvailable", "stockLevel", "qty"):
+                if key in obj:
+                    val = obj[key]
+                    if isinstance(val, bool):
+                        return val
+                    if isinstance(val, (int, float)):
+                        return val > 0
+        for v in obj.values():
+            result = walk_json_for_size(v, target_size, depth + 1)
+            if result is not None:
+                return result
+
+    elif isinstance(obj, list):
+        for item in obj:
+            result = walk_json_for_size(item, target_size, depth + 1)
+            if result is not None:
+                return result
+
+    return None
 
 
 def send_telegram(message: str) -> None:
@@ -98,7 +151,7 @@ def main() -> None:
     available = check_size_available()
 
     if available:
-        print("✅ Size 12 is IN STOCK — sending Telegram notification!")
+        print("✅ Size 12 IN STOCK — sending Telegram notification!")
         message = (
             f"🛍 <b>Valencia dress — Size {TARGET_SIZE} is back in stock!</b>\n\n"
             f"Reiss Valencia Contrast-Trim Flared Midi Dress\n"
